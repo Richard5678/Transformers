@@ -16,12 +16,10 @@ class DecoderBlock(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(embed_dim)
         self.ff = nn.Sequential(
-            [
-                nn.Linear(embed_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, embed_dim),
-                nn.Dropout(dropout),
-            ]
+            nn.Linear(embed_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, embed_dim),
+            nn.Dropout(dropout),
         )
         
         self.norm2 = nn.LayerNorm(embed_dim)
