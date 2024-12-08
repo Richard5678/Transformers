@@ -1,16 +1,27 @@
 import unittest
-from transformers.blocks import DecoderBlock 
+from transformers.blocks import MultiHeadAttention, FeedForwardNetwork
 import torch
 
 
-class TestBlocks(unittest.TestCase):
-    
+class TestMultiHeadAttention(unittest.TestCase):
     def test_shape(self):
         embed_dim = 10
         bat_size = 50
     
-        decoder = DecoderBlock(embed_dim=embed_dim, num_heads=5, hidden_dim=3)
+        multi_head_attn = MultiHeadAttention(embed_dim=embed_dim, num_heads=5)
         input = torch.rand((bat_size, embed_dim))
-        output = decoder(input)
+        output = multi_head_attn(input, input, input)
+
+        self.assertEqual(input.shape, output.shape)
+
+        
+class TestFeedForwardNetwork(unittest.TestCase):
+    def test_shape(self):
+        embed_dim = 10
+        bat_size = 50
+    
+        feed_forward_network = FeedForwardNetwork(embed_dim=embed_dim, hidden_dim=3)
+        input = torch.rand((bat_size, embed_dim))
+        output = feed_forward_network(input)
 
         self.assertEqual(input.shape, output.shape)
