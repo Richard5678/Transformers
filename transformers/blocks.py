@@ -36,6 +36,7 @@ class FeedForwardNetwork(nn.Module):
         self.linear2 = nn.Linear(hidden_dim, embed_dim)
         self.dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(embed_dim)
+
     def forward(self, x):
         ff_output = self.linear1(x)
         ff_output = self.relu(ff_output)
