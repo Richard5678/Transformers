@@ -13,6 +13,10 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 def get_position_ids(input_ids):
+    '''
+        Get the position ids for the input ids.
+        This is used to get the position embeddings for the input ids.
+    '''
     batch_size, seq_len = input_ids.size()
     position_ids = torch.arange(0, seq_len, dtype=torch.long, device=device)
     position_ids = position_ids.unsqueeze(0).expand(batch_size, seq_len)
