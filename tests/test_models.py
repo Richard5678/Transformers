@@ -27,6 +27,7 @@ class TestTransformerEncoder(unittest.TestCase):
             max_seq_length=max_seq_length,
             hidden_dim=hidden_dim
         ).to(device)
+        
         input = torch.randint(0, vocab_size, (bat_size, seq_len), dtype=torch.long).to(device)
         output = transformer(input)
 
@@ -76,6 +77,7 @@ class TestTransformer(unittest.TestCase):
             max_seq_length=max_seq_length,
             hidden_dim=hidden_dim
         ).to(device)
+        
         input = torch.randint(0, vocab_size, (bat_size, seq_len), dtype=torch.long).to(device)
         output = transformer(input, input)
 

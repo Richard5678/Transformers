@@ -39,7 +39,7 @@ class TransformerEncoderOnly(nn.Module):
         
     def forward(self, input_ids):
         # Move input_ids to the same device as the model
-        input_ids = input_ids.to(device)
+        input_ids = input_ids
         
         token_embed = self.token_embedding(input_ids)
         pos_embed = self.pos_embedding(get_position_ids(input_ids))
@@ -82,7 +82,7 @@ class TransformerDecoderOnly(nn.Module):
 
     def forward(self, input_ids):
         # Move input_ids to the same device as the model
-        input_ids = input_ids.to(device)
+        input_ids = input_ids
         
         token_embed = self.token_embedding(input_ids)
         pos_embed = self.pos_embedding(get_position_ids(input_ids))
@@ -130,8 +130,8 @@ class TransformerEncoderDecoder(nn.Module):
         
     def forward(self, input_ids, tgt_ids):
         # Move input_ids to the same device as the model
-        input_ids = input_ids.to(device)
-        tgt_ids = tgt_ids.to(device)
+        input_ids = input_ids
+        tgt_ids = tgt_ids
         
         # encoder embedding
         token_embed = self.token_embedding(input_ids)
