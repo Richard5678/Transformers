@@ -9,9 +9,9 @@ Implementation of components of Transformer architecture:
 import torch.nn as nn
 
 
-class MultiHeadAttention(nn.Module):
+class MultiHeadAttentionBlock(nn.Module):
     def __init__(self, embed_dim, num_heads, dropout=0.1):
-        super(MultiHeadAttention, self).__init__()
+        super(MultiHeadAttentionBlock, self).__init__()
         
         self.multi_head_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout)
         self.dropout1 = nn.Dropout(dropout)
@@ -27,9 +27,9 @@ class MultiHeadAttention(nn.Module):
         return value
 
 
-class FeedForwardNetwork(nn.Module):
+class FeedForwardNetworkBlock(nn.Module):
     def __init__(self, embed_dim, hidden_dim, dropout=0.1):
-        super(FeedForwardNetwork, self).__init__()
+        super(FeedForwardNetworkBlock, self).__init__()
 
         self.linear1 = nn.Linear(embed_dim, hidden_dim)
         self.relu = nn.ReLU()
