@@ -21,7 +21,7 @@ class MultiHeadAttentionBlock(nn.Module):
         attn_output, _ = self.multi_head_attn(query, key, value, attn_mask=attn_mask)
 
         # add & norm
-        value += self.dropout1(attn_output)
+        value = value + self.dropout1(attn_output)
         value = self.norm1(value)
 
         return value
@@ -44,7 +44,7 @@ class FeedForwardNetworkBlock(nn.Module):
         ff_output = self.linear2(ff_output)
 
         # add & norm
-        x += ff_output
+        x = x + ff_output
         x = self.norm(x)
 
         return x
