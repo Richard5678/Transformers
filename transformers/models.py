@@ -24,6 +24,11 @@ def get_position_ids(input_ids):
     return position_ids
 
 
+def _generate_square_subsequent_mask(sz):
+    """Generate a square mask for the sequence. The masked positions are filled with float('-inf')."""
+    mask = torch.triu(torch.ones(sz, sz) * float('-inf'), diagonal=1)
+    return mask
+
 class TransformerEncoderOnly(nn.Module):
     def __init__(self, embed_dim, num_heads, vocab_size, max_seq_length, num_layers, hidden_dim, dropout=0.1):
         super(TransformerEncoderOnly, self).__init__()
@@ -81,31 +86,34 @@ class TransformerDecoderOnly(nn.Module):
             ) for _ in range(num_layers)
         ])
 
+        self.ln = nn.LayerNorm(embed_dim)
         self.linear = nn.Linear(embed_dim, vocab_size)
-        self.softmax = nn.Softmax(dim=-1)
+        # self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, input_ids):
-        # Move input_ids to the same device as the model
-        input_ids = input_ids
-        
         token_embed = self.token_embedding(input_ids)
         pos_embed = self.pos_embedding(get_position_ids(input_ids))
         x = token_embed + pos_embed
+
+        mask = _generate_square_subsequent_mask(input_ids.size(1)).to(device)
 
         # (batch_size, seq_len, embed_dim) -> (seq_len, batch_size, embed_dim)
         x = x.transpose(0, 1)
         
         # decoder layers
         for layer in self.decoder_layers:
-            x = layer[0](x, x, x)
+            x = layer[0](x, x, x, attn_mask=mask)
             x = layer[1](x)
 
         # (seq_len, batch_size, embed_dim) -> (batch_size, seq_len, embed_dim)
         x = x.transpose(0, 1)
 
-        # linear & softmax
+        # linear & softmax x = self.linear(x)
+        x = self.ln(x)
         x = self.linear(x)
-        x = self.softmax(x)
+        
+
+        #  # x = self.softmax(x)
         
         return x
 
@@ -157,13 +165,15 @@ class TransformerEncoderDecoder(nn.Module):
         pos_embed = self.pos_embedding(get_position_ids(tgt_ids))
         x = token_embed + pos_embed
 
+        mask = _generate_square_subsequent_mask(tgt_ids.size(1)).to(device)
+
         # (batch_size, seq_len, embed_dim) -> (seq_len, batch_size, embed_dim)
         x = x.transpose(0, 1)
 
         # decoder layers
         for _ in range(self.num_layers):
-            x = self.self_attention(x, x, x)
-            x = self.cross_attention(x, memory, memory)
+            x = self.self_attention(x, x, x, attn_mask=mask)
+            x = self.cross_attention(x, memory, memory, attn_mask=mask)
             x = self.ff(x)
 
         # (seq_len, batch_size, embed_dim) -> (batch_size, seq_len, embed_dim)
