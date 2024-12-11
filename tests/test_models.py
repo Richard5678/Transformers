@@ -27,6 +27,7 @@ class TestTransformerEncoder(unittest.TestCase):
             embed_dim=embed_dim,
             num_layers=2,
             num_heads=5,
+            num_labels=vocab_size,
             vocab_size=vocab_size,
             max_seq_length=max_seq_length,
             hidden_dim=hidden_dim,
