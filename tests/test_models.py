@@ -1,13 +1,17 @@
-'''
+"""
 Tests for the transformers.py file
-'''
+"""
 
 import torch
-from transformers.models import TransformerEncoderOnly, TransformerDecoderOnly, TransformerEncoderDecoder
+from mytransformers.models import (
+    TransformerEncoderOnly,
+    TransformerDecoderOnly,
+    TransformerEncoderDecoder,
+)
 import unittest
 
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class TestTransformerEncoder(unittest.TestCase):
@@ -20,15 +24,17 @@ class TestTransformerEncoder(unittest.TestCase):
         hidden_dim = 512  # Example value
 
         transformer = TransformerEncoderOnly(
-            embed_dim=embed_dim, 
-            num_layers=2, 
+            embed_dim=embed_dim,
+            num_layers=2,
             num_heads=5,
             vocab_size=vocab_size,
             max_seq_length=max_seq_length,
-            hidden_dim=hidden_dim
+            hidden_dim=hidden_dim,
         ).to(device)
-        
-        input = torch.randint(0, vocab_size, (bat_size, seq_len), dtype=torch.long).to(device)
+
+        input = torch.randint(0, vocab_size, (bat_size, seq_len), dtype=torch.long).to(
+            device
+        )
         output = transformer(input)
 
         expected_output_shape = (bat_size, seq_len, vocab_size)
@@ -45,15 +51,17 @@ class TestTransformerDecoder(unittest.TestCase):
         hidden_dim = 512  # Example value
 
         transformer = TransformerDecoderOnly(
-            embed_dim=embed_dim, 
-            num_layers=2, 
+            embed_dim=embed_dim,
+            num_layers=2,
             num_heads=5,
             vocab_size=vocab_size,
             max_seq_length=max_seq_length,
-            hidden_dim=hidden_dim
+            hidden_dim=hidden_dim,
         ).to(device)
-        
-        input = torch.randint(0, vocab_size, (bat_size, seq_len), dtype=torch.long).to(device)
+
+        input = torch.randint(0, vocab_size, (bat_size, seq_len), dtype=torch.long).to(
+            device
+        )
         output = transformer(input)
 
         expected_output_shape = (bat_size, seq_len, vocab_size)
@@ -70,20 +78,22 @@ class TestTransformer(unittest.TestCase):
         hidden_dim = 512  # Example value
 
         transformer = TransformerEncoderDecoder(
-            embed_dim=embed_dim, 
-            num_layers=2, 
+            embed_dim=embed_dim,
+            num_layers=2,
             num_heads=5,
             vocab_size=vocab_size,
             max_seq_length=max_seq_length,
-            hidden_dim=hidden_dim
+            hidden_dim=hidden_dim,
         ).to(device)
-        
-        input = torch.randint(0, vocab_size, (bat_size, seq_len), dtype=torch.long).to(device)
+
+        input = torch.randint(0, vocab_size, (bat_size, seq_len), dtype=torch.long).to(
+            device
+        )
         output = transformer(input, input)
 
         expected_output_shape = (bat_size, seq_len, vocab_size)
         self.assertEqual(expected_output_shape, output.shape)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

@@ -6,7 +6,7 @@ import string
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from transformers.models import TransformerDecoderOnly
+from mytransformers.models import TransformerDecoderOnly
 from typing import List, Dict
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
