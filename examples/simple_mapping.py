@@ -3,11 +3,13 @@ Simple letter to letter mapping example using decoder only transformer.
 """
 
 import string
+from typing import Dict
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
 from mytransformers.models import TransformerDecoderOnly
-from typing import List, Dict
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
