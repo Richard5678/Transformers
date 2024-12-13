@@ -1,0 +1,5 @@
+average loss is: 0.5627433285427094
+average accuracy is: 0.7315999865531921
+confusion matrix:
+ [[ 7308  5192]
+ [ 1518 10982]]
