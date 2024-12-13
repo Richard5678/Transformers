@@ -1,3 +1,15 @@
+"""
+This is a simple sentiment analysis example using a TransformerEncoderOnly model.
+
+Example log: logs/sentiment_analysis.log
+
+Average loss is: 0.5627433285427094
+Average accuracy is: 0.7315999865531921
+Confusion matrix:
+ [[ 7308  5192]
+ [ 1518 10982]]
+"""
+
 # Import standard libraries
 import numpy as np
 
