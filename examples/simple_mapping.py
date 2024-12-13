@@ -1,5 +1,15 @@
 """
 Simple letter to letter mapping example using decoder only transformer.
+
+Example log: logs/simple_mapping.log
+
+Epoch 1, Loss: 3.5802252292633057
+Epoch 11, Loss: 2.193671703338623
+Epoch 21, Loss: 1.8208796977996826
+Epoch 31, Loss: 1.6697012186050415
+Epoch 41, Loss: 1.5886874198913574
+Input: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z']
+Predictions: ['b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', 'a']
 """
 
 import string
@@ -63,7 +73,7 @@ def create_dataset():
     return torch.stack(tensor_data).to(device), word2idx, idx2word, vocab_size
 
 
-def train_model(model: nn.Module, input_ids: torch.Tensor, epochs: int = 500):
+def train_model(model: nn.Module, input_ids: torch.Tensor, epochs: int = 50):
     """Train the model.
 
     Args:
@@ -133,8 +143,10 @@ def main():
 
     # Generate predictions
     predictions = generate_predictions(model, input_ids, idx2word)
+    input_chars = [idx2word[seq[1]] for seq in input_ids.cpu().tolist()]
 
-    print(predictions)
+    print(f"Input: {input_chars}")
+    print(f"Predictions: {predictions}")
 
     # TODO: Generate tokens autoregressively until EOS token is reached
 
