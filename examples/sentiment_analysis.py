@@ -1,22 +1,26 @@
-from transformers import AutoTokenizer
-from mytransformers.models import TransformerEncoderOnly
-from sklearn.metrics import confusion_matrix
-from datasets import load_dataset
+# Import standard libraries
 import numpy as np
-import torch
-from torch.utils.data import DataLoader
-from torch.optim import Adam
-import torch.nn as nn
-from tqdm import tqdm
-from sklearn.metrics import confusion_matrix
 
+# Import third-party libraries
+import torch
+import torch.nn as nn
+from torch.optim import Adam
+from torch.utils.data import DataLoader
+from sklearn.metrics import confusion_matrix
+from tqdm import tqdm
+from transformers import AutoTokenizer
+from datasets import load_dataset
+
+# Import local modules
+from mytransformers.models import TransformerEncoderOnly
+
+# Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def tokenize_data(dataset, tokenizer):
     X = tokenizer(dataset["text"], padding=True, truncation=True, return_tensors="pt")
     Y = torch.tensor(dataset["label"])
-
     return X, Y
 
 
@@ -42,15 +46,15 @@ def train_model(model, train_loader, epoch=1):
         for input_ids, labels in tqdm(train_loader):
             optimizer.zero_grad()
 
-            # forward pass
+            # Forward pass
             input_ids, labels = input_ids.to(device), labels.to(device)
             output = model(input_ids)  # (batch_size, seq_len, num_labels)
 
-            # loss calculation
+            # Loss calculation
             logits = output[:, 0, :]  # (batch_size, num_labels)
             loss = criterion(logits, labels)
 
-            # backward pass
+            # Backward pass
             loss.backward()
             optimizer.step()
 
@@ -65,11 +69,11 @@ def evaluate_model(model, test_loader):
         all_labels = []
 
         for input_ids, labels in tqdm(test_loader):
-            # forward pass
+            # Forward pass
             input_ids, labels = input_ids.to(device), labels.to(device)
             output = model(input_ids)  # (batch_size, seq_length, num_labels)
 
-            # loss calculation
+            # Loss calculation
             logits = output[:, 0, :]  # (batch_size, num_labels)
             loss = criterion(logits, labels)
             average_loss += loss.item()
@@ -83,33 +87,33 @@ def evaluate_model(model, test_loader):
         average_loss /= len(test_loader)
         average_accuracy /= len(test_loader)
 
-        print(f"average loss is: {average_loss}")
-        print(f"average accuracy is: {average_accuracy}")
+        print(f"Average loss is: {average_loss}")
+        print(f"Average accuracy is: {average_accuracy}")
 
         matrix = confusion_matrix(
             np.concatenate(all_labels), np.concatenate(all_predictions)
         )
 
-        print(f"confusion matrix:\n {matrix}")
+        print(f"Confusion matrix:\n {matrix}")
 
 
 def main():
-    # load dataset
+    # Load dataset
     dataset = load_dataset("imdb")
 
-    # tokenization
+    # Tokenization
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
     train_encodings, train_labels = tokenize_data(dataset["train"], tokenizer)
     test_encodings, test_labels = tokenize_data(dataset["test"], tokenizer)
 
-    # dataset construction
+    # Dataset construction
     train_dataset = CustomDataset(train_encodings, train_labels)
     test_dataset = CustomDataset(test_encodings, test_labels)
 
     train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, num_workers=4)
     test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False, num_workers=4)
 
-    # model creation
+    # Model creation
     model = TransformerEncoderOnly(
         embed_dim=768,
         num_heads=16,
@@ -120,10 +124,10 @@ def main():
         hidden_dim=768,
     ).to(device)
 
-    # model training
+    # Model training
     train_model(model, train_loader)
 
-    # model evaluation
+    # Model evaluation
     evaluate_model(model, test_loader)
 
 
