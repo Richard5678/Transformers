@@ -85,6 +85,15 @@ class TransformerEncoderOnly(nn.Module):
 
         return x
 
+    def save_model(self, file_path):
+        """Save the model to a file."""
+        torch.save(self.state_dict(), file_path)
+
+    def load_model(self, file_path):
+        """Load the model from a file."""
+        self.load_state_dict(torch.load(file_path))
+        self.to(device)
+
 
 class TransformerDecoderOnly(nn.Module):
     def __init__(
@@ -142,6 +151,15 @@ class TransformerDecoderOnly(nn.Module):
 
         return x
 
+    def save_model(self, file_path):
+        """Save the model to a file."""
+        torch.save(self.state_dict(), file_path)
+
+    def load_model(self, file_path):
+        """Load the model from a file."""
+        self.load_state_dict(torch.load(file_path))
+        self.to(device)
+
 
 class TransformerEncoderDecoder(nn.Module):
     def __init__(
@@ -152,6 +170,7 @@ class TransformerEncoderDecoder(nn.Module):
         max_seq_length,
         num_layers,
         hidden_dim,
+        num_labels,
         dropout=0.1,
     ):
         super(TransformerEncoderDecoder, self).__init__()
@@ -174,10 +193,10 @@ class TransformerEncoderDecoder(nn.Module):
         self.cross_attention = MultiHeadAttentionBlock(embed_dim, num_heads, dropout)
         self.ff = FeedForwardNetworkBlock(embed_dim, hidden_dim, dropout)
 
-        self.linear = nn.Linear(embed_dim, vocab_size)
+        self.linear = nn.Linear(embed_dim, num_labels)
         self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, input_ids, tgt_ids):
+    def forward(self, input_ids, tgt_ids, src_mask=None, tgt_mask=None):
         # Move input_ids to the same device as the model
         input_ids = input_ids
         tgt_ids = tgt_ids
@@ -192,7 +211,7 @@ class TransformerEncoderDecoder(nn.Module):
 
         # encoder layers
         for layer in self.encoder_layers:
-            x = layer[0](x, x, x)
+            x = layer[0](x, x, x, key_padding_mask=src_mask)
             x = layer[1](x)
 
         memory = x
@@ -209,8 +228,8 @@ class TransformerEncoderDecoder(nn.Module):
 
         # decoder layers
         for _ in range(self.num_layers):
-            x = self.self_attention(x, x, x, attn_mask=mask)
-            x = self.cross_attention(x, memory, memory, attn_mask=mask)
+            x = self.self_attention(x, x, x, attn_mask=mask, key_padding_mask=tgt_mask)
+            x = self.cross_attention(x, memory, memory, attn_mask=mask, key_padding_mask=src_mask)
             x = self.ff(x)
 
         # (seq_len, batch_size, embed_dim) -> (batch_size, seq_len, embed_dim)
@@ -220,3 +239,12 @@ class TransformerEncoderDecoder(nn.Module):
         x = self.softmax(x)
 
         return x
+
+    def save_model(self, file_path):
+        """Save the model to a file."""
+        torch.save(self.state_dict(), file_path)
+
+    def load_model(self, file_path):
+        """Load the model from a file."""
+        self.load_state_dict(torch.load(file_path))
+        self.to(device)
