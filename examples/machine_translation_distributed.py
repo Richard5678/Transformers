@@ -9,6 +9,7 @@ import torch
 import torch.distributed as dist
 import numpy as np
 import matplotlib.pyplot as plt
+import math
 
 from datetime import datetime
 from torch.utils.data import DataLoader
@@ -20,7 +21,43 @@ from torch import nn
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from mytransformers.models import TransformerEncoderDecoder
+
+class TransformerEncoderDecoder(nn.Module):
+    def __init__(
+        self,
+        vocab_size_en,
+        vocab_size_zh,
+        embed_dim,
+        num_heads,
+        num_layers,
+        dim_feedforward,
+        dropout,
+    ):
+        super(TransformerEncoderDecoder, self).__init__()
+        self.embedding_en = nn.Embedding(vocab_size_en, embed_dim)
+        self.embedding_zh = nn.Embedding(vocab_size_zh, embed_dim)
+        self.transformer = nn.Transformer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            num_encoder_layers=num_layers,
+            num_decoder_layers=num_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation="relu",
+        )
+        self.fc_out = nn.Linear(embed_dim, vocab_size_zh)
+
+    def forward(self, src, tgt, src_mask=None, tgt_mask=None):
+        src_emb = self.embedding_en(src) * math.sqrt(self.transformer.d_model)
+        tgt_emb = self.embedding_zh(tgt) * math.sqrt(self.transformer.d_model)
+        memory = self.transformer.encoder(src_emb, src_key_padding_mask=src_mask)
+        output = self.transformer.decoder(
+            tgt_emb, memory, tgt_key_padding_mask=tgt_mask
+        )
+        return self.fc_out(output)
+
+    def load_model(self, path):
+        self.load_state_dict(torch.load(path))
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -69,7 +106,7 @@ def cleanup_distributed():
     dist.destroy_process_group()
 
 
-def train_model(model, train_loader, epochs=1):
+def train_model(model, train_loader, epochs=10):
     optimizer = AdamW(model.parameters(), lr=1e-5)
     criterion = nn.CrossEntropyLoss(ignore_index=0)
 
@@ -81,7 +118,11 @@ def train_model(model, train_loader, epochs=1):
     else:
         epoch_iterator = range(epochs)
 
+    epoch_losses = []  # List to store loss of each epoch
+
     for epoch in epoch_iterator:
+        train_loader.sampler.set_epoch(epoch)
+
         print(f"Starting epoch {epoch} on rank {dist.get_rank()}")
         epoch_loss = 0  # Initialize epoch loss
         if dist.get_rank() == 0:
@@ -94,8 +135,14 @@ def train_model(model, train_loader, epochs=1):
             input_ids_en = input_ids_en.to(device)
             input_ids_zh = input_ids_zh.to(device)
 
+            # Ensure masks have the correct shape (batch_size, seq_len)
             src_mask = (input_ids_en != 0).to(device)
             tgt_mask = (input_ids_zh != 0).to(device)
+
+            # Transpose the masks to match the expected shape
+            src_mask = src_mask.transpose(0, 1)
+            tgt_mask = tgt_mask.transpose(0, 1)
+
             # forward pass: (batch_size, seq_len), (batch_size, seq_len) -> (batch_size, seq_len, vocab_size)
             outputs = model(input_ids_en, input_ids_zh, src_mask, tgt_mask)
 
@@ -110,12 +157,16 @@ def train_model(model, train_loader, epochs=1):
 
             epoch_loss += loss.item()  # Accumulate loss
 
+        # Store the average loss for the epoch
+        epoch_losses.append(epoch_loss / len(train_loader))
+
         # Synchronize all processes at the end of each epoch
         dist.barrier()
 
-    # Print average loss for the epoch
+    # Print average loss for each epoch
     if dist.get_rank() == 0:
-        print(f"Epoch {epoch}, Average Loss: {epoch_loss / len(train_loader):.4f}")
+        print("Average loss for each epoch:")
+        print(epoch_losses)
 
 
 def evaluate_model(model, test_loader):
@@ -131,6 +182,9 @@ def evaluate_model(model, test_loader):
 
             src_mask = (input_ids_en != 0).to(device)
             tgt_mask = (input_ids_zh != 0).to(device)
+
+            src_mask = src_mask.transpose(0, 1)
+            tgt_mask = tgt_mask.transpose(0, 1)
             outputs = model(input_ids_en, input_ids_zh, src_mask, tgt_mask)
 
             target_ids = torch.roll(input_ids_zh, shifts=-1, dims=1)
@@ -146,6 +200,7 @@ def evaluate_model(model, test_loader):
     average_loss /= len(test_loader)
     all_preds = np.array(all_preds)
     all_labels = np.array(all_labels)
+
     average_accuracy = np.mean(all_preds == all_labels)
     print(f"Average loss: {average_loss:.4f}, Average accuracy: {average_accuracy:.4f}")
 
@@ -245,14 +300,23 @@ def main():
     )
 
     # Create model
+    # model = TransformerEncoderDecoder(
+    #     vocab_size_en=tokenizer_en.vocab_size,
+    #     vocab_size_zh=tokenizer_zh.vocab_size,
+    #     embed_dim=768,
+    #     num_heads=16,
+    #     num_layers=3,
+    #     dim_feedforward=768,
+    #     dropout=0.1,
+    # ).to(device)
     model = TransformerEncoderDecoder(
+        vocab_size_en=tokenizer_en.vocab_size,
+        vocab_size_zh=tokenizer_zh.vocab_size,
         embed_dim=768,
         num_heads=16,
-        vocab_size=tokenizer_en.vocab_size,
-        num_labels=tokenizer_zh.vocab_size,
-        max_seq_length=max_seq_length,
         num_layers=3,
-        hidden_dim=768,
+        dim_feedforward=768,
+        dropout=0.1,
     ).to(device)
 
     # Wrap the model with DistributedDataParallel
