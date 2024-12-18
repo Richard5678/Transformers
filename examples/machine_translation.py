@@ -12,6 +12,7 @@ from torch.optim import AdamW
 from torch import nn
 import numpy as np
 import matplotlib.pyplot as plt
+
 # from mytransformers.models import TransformerEncoderDecoder
 from machine_translation_distributed import TransformerEncoderDecoder
 
@@ -117,39 +118,27 @@ def evaluate_model(model, test_loader):
     print(f"Average loss: {average_loss:.4f}, Average accuracy: {average_accuracy:.4f}")
 
 
-
-def generate_text(model, input_ids, max_length=512, eos_token_id=None):
+def generate_text(
+    model, input_ids, max_length=512, start_token_id=None, eos_token_id=None
+):
     model.eval()
     # Initialize tgt_ids with the start token, matching the shape of input_ids
-    tokenizer_zh = AutoTokenizer.from_pretrained("bert-base-chinese")
-    start_token_id = (
-        tokenizer_zh.cls_token_id
-    )  # Assuming the tokenizer has a CLS token as start
-    tgt_ids = torch.full((input_ids.shape[0], max_length), 0, dtype=torch.long).to(
-        device
-    )
+    tgt_ids = torch.full(input_ids.shape, 0, dtype=torch.long).to(device)
     tgt_ids[:, 0] = start_token_id
-    src_mask = (input_ids != 0).to(device)
-    tgt_mask = (tgt_ids != 0).to(device)
-    src_mask = src_mask.transpose(0, 1)
-    tgt_mask = tgt_mask.transpose(0, 1)
-    print(f"src_mask shape: {src_mask.shape}")
-    print(f"tgt_mask shape: {tgt_mask.shape}")
-    print(f"input_ids shape: {input_ids.shape}")
-    print(f"tgt_ids shape: {tgt_ids.shape}")
+    src_key_padding_mask = (input_ids == 0).to(device)
+    tgt_key_padding_mask = (tgt_ids == 0).to(device)
     with torch.no_grad():
         for i in tqdm(range(max_length - 1)):  # Adjust range to max_length - 1
-            outputs = model(input_ids, tgt_ids, src_mask=src_mask, tgt_mask=tgt_mask)
+            outputs = model(
+                input_ids, tgt_ids, src_key_padding_mask, tgt_key_padding_mask
+            )
             next_token_logits = outputs[:, i, :]  # Use the current position i
-            next_token_logits[:, 0] = -float("inf")
-
             next_token_id = torch.argmax(next_token_logits, dim=-1)
-            # tgt_ids[:, i + 1] = next_token_id  # Append the token to index i + 1
-            tgt_ids[0, i + 1] = next_token_id
-            print(f"next_token_id: {next_token_id}; eos_token_id: {eos_token_id}")
+            tgt_ids[:, i + 1] = next_token_id  # Append the token to index i + 1
             if eos_token_id is not None and (next_token_id == eos_token_id).all():
                 break
-            tgt_mask[i + 1, 0] = 1
+
+            tgt_key_padding_mask[:, i + 1] = False
 
     print(tgt_ids)
     return tgt_ids
@@ -175,9 +164,7 @@ def main():
     train_encodings_en = tokenizer_en.batch_encode_plus(
         [
             item["translation"]["en"]
-            for item in tqdm(
-                dataset["train"], desc="Tokenizing English Train Data"
-            )
+            for item in tqdm(dataset["train"], desc="Tokenizing English Train Data")
         ],
         padding=True,
         truncation=True,
@@ -233,6 +220,7 @@ def main():
     #     hidden_dim=768,
     # ).to(device)
     from machine_translation_distributed import TransformerEncoderDecoder
+
     model = TransformerEncoderDecoder(
         vocab_size_en=tokenizer_en.vocab_size,
         vocab_size_zh=tokenizer_zh.vocab_size,
@@ -276,17 +264,29 @@ def generate_example(max_seq_length):
 
     from machine_translation_distributed import TransformerEncoderDecoder
 
+    # model = TransformerEncoderDecoder(
+    #     vocab_size_en=tokenizer_en.vocab_size,
+    #     vocab_size_zh=tokenizer_zh.vocab_size,
+    #     embed_dim=768,
+    #     num_heads=16,
+    #     num_layers=3,
+    #     dim_feedforward=768,
+    #     dropout=0.1,
+    # ).to(device)
+    # model.load_model("model_2024-12-15_03:27:21.pth")  # lib transformer
+    # model.load_model("model_2024-12-15_07:02:19.pth") # library use - long training
+
     model = TransformerEncoderDecoder(
         vocab_size_en=tokenizer_en.vocab_size,
         vocab_size_zh=tokenizer_zh.vocab_size,
-        embed_dim=768,
-        num_heads=16,
-        num_layers=3,
-        dim_feedforward=768,
+        embed_dim=512,
+        num_heads=8,
+        num_layers=6,
+        dim_feedforward=512,
         dropout=0.1,
     ).to(device)
-    # model.load_model("model_2024-12-15_03:27:21.pth")  # lib transformer
-    model.load_model("model_2024-12-15_07:02:19.pth") # library use - long training
+    # model.load_model("model_2024-12-18_03:40:35.pth")
+    model.load_model("model_2024-12-18_04:07:10.pth")
 
     # dataset = load_dataset("iwslt2017", "iwslt2017-en-zh")
     # test_encodings_en = tokenizer_en.batch_encode_plus(
@@ -306,7 +306,8 @@ def generate_example(max_seq_length):
 
     # prompt = "Hello, how are you?"
     # prompt = "beijing is a beautiful city"
-    prompt = "Several years ago here at TED, Peter Skillman introduced a design challenge called the marshmallow..."
+    # prompt = "Several years ago here at TED, Peter Skillman introduced a design challenge called the marshmallow..."
+    prompt = "I am a student at the University of California, Berkeley"
     input_ids = tokenizer_en.encode(
         prompt,
         padding="max_length",
@@ -319,7 +320,11 @@ def generate_example(max_seq_length):
     # eos_token_id = tokenizer_zh.eos_token_id  # Assuming the tokenizer has an EOS token
     # print(f"eos_token_id: {eos_token_id}")
     outputs = generate_text(
-        model, input_ids, max_length=max_seq_length, eos_token_id=tokenizer_zh.sep_token_id
+        model,
+        input_ids,
+        max_length=max_seq_length,
+        start_token_id=tokenizer_zh.cls_token_id,
+        eos_token_id=tokenizer_zh.sep_token_id,
     )
     # print translated text
     print(tokenizer_zh.decode(outputs[0], skip_special_tokens=True))
