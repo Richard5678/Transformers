@@ -21,6 +21,14 @@ from torch import nn
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+import os
+import warnings
+
+# Suppress specific PyTorch warnings
+warnings.filterwarnings("ignore")
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 
 class TransformerEncoderDecoder(nn.Module):
     def __init__(
@@ -44,15 +52,36 @@ class TransformerEncoderDecoder(nn.Module):
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             activation="relu",
+            batch_first=True,
         )
         self.fc_out = nn.Linear(embed_dim, vocab_size_zh)
 
-    def forward(self, src, tgt, src_mask=None, tgt_mask=None):
+    def forward(self, src, tgt, src_key_padding_mask=None, tgt_key_padding_mask=None):
         src_emb = self.embedding_en(src) * math.sqrt(self.transformer.d_model)
         tgt_emb = self.embedding_zh(tgt) * math.sqrt(self.transformer.d_model)
-        memory = self.transformer.encoder(src_emb, src_key_padding_mask=src_mask)
-        output = self.transformer.decoder(
-            tgt_emb, memory, tgt_key_padding_mask=tgt_mask
+
+        # Ensure masks are of the same type
+        src_key_padding_mask = (
+            src_key_padding_mask.to(torch.bool)
+            if src_key_padding_mask is not None
+            else None
+        )
+        tgt_key_padding_mask = (
+            tgt_key_padding_mask.to(torch.bool)
+            if tgt_key_padding_mask is not None
+            else None
+        )
+
+        subsequent_mask = torch.triu(
+            torch.ones(tgt.size(1), tgt.size(1), dtype=torch.bool), diagonal=1
+        ).to(device)
+
+        output = self.transformer(
+            src_emb,
+            tgt_emb,
+            src_key_padding_mask=src_key_padding_mask,
+            tgt_key_padding_mask=tgt_key_padding_mask,
+            tgt_mask=subsequent_mask,
         )
         return self.fc_out(output)
 
@@ -61,16 +90,6 @@ class TransformerEncoderDecoder(nn.Module):
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def load_data():
-    dataset = load_dataset("iwslt2017", "iwslt2017-en-zh")
-    train_dataset = dataset["train"].select(range(10))
-    test_dataset = dataset["test"].select(range(10))
-    print(f"Train dataset size: {len(train_dataset)}")
-    print(f"Test dataset size: {len(test_dataset)}")
-
-    return train_dataset, test_dataset
 
 
 class CustomDataset(torch.utils.data.Dataset):
@@ -106,25 +125,30 @@ def cleanup_distributed():
     dist.destroy_process_group()
 
 
-def train_model(model, train_loader, epochs=10):
-    optimizer = AdamW(model.parameters(), lr=1e-5)
+def get_learning_rate(step_num, d_model, warmup_steps):
+    return (d_model**-0.5) * min(step_num**-0.5, step_num * (warmup_steps**-1.5))
+
+
+def train_model(model, train_loader, epochs=50, d_model=512, warmup_steps=4000):
+    optimizer = AdamW(model.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9)
     criterion = nn.CrossEntropyLoss(ignore_index=0)
 
     model.train()
 
-    # only rank 0 will print the progress bar
     if dist.get_rank() == 0:
-        epoch_iterator = tqdm(range(epochs))
+        epoch_iterator = range(epochs)
     else:
         epoch_iterator = range(epochs)
 
-    epoch_losses = []  # List to store loss of each epoch
+    epoch_losses = []
+
+    global_step = 0  # Track the global step number
 
     for epoch in epoch_iterator:
         train_loader.sampler.set_epoch(epoch)
 
         print(f"Starting epoch {epoch} on rank {dist.get_rank()}")
-        epoch_loss = 0  # Initialize epoch loss
+        epoch_loss = 0
         if dist.get_rank() == 0:
             batch_iterator = tqdm(train_loader)
         else:
@@ -135,35 +159,32 @@ def train_model(model, train_loader, epochs=10):
             input_ids_en = input_ids_en.to(device)
             input_ids_zh = input_ids_zh.to(device)
 
-            # Ensure masks have the correct shape (batch_size, seq_len)
-            src_mask = (input_ids_en != 0).to(device)
-            tgt_mask = (input_ids_zh != 0).to(device)
+            src_mask = (input_ids_en == 0).to(device)
+            tgt_mask = (input_ids_zh == 0).to(device)
 
-            # Transpose the masks to match the expected shape
-            src_mask = src_mask.transpose(0, 1)
-            tgt_mask = tgt_mask.transpose(0, 1)
-
-            # forward pass: (batch_size, seq_len), (batch_size, seq_len) -> (batch_size, seq_len, vocab_size)
             outputs = model(input_ids_en, input_ids_zh, src_mask, tgt_mask)
 
-            # compute loss
-            target_ids = torch.roll(input_ids_zh, shifts=-1, dims=1)
-            target_ids[:, -1] = 0  # pad token
-            loss = criterion(outputs.view(-1, outputs.size(-1)), target_ids.view(-1))
+            target_ids = input_ids_zh[:, 1:].reshape(-1)
+            output_logits = outputs[:, :-1, :].reshape(-1, outputs.size(-1))
 
-            # backprop
+            loss = criterion(output_logits, target_ids)
+
             loss.backward()
+
+            # Update learning rate
+            lr = get_learning_rate(global_step + 1, d_model, warmup_steps)
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = lr
+
             optimizer.step()
 
-            epoch_loss += loss.item()  # Accumulate loss
+            epoch_loss += loss.item()
+            global_step += 1  # Increment the global step
 
-        # Store the average loss for the epoch
         epoch_losses.append(epoch_loss / len(train_loader))
 
-        # Synchronize all processes at the end of each epoch
         dist.barrier()
 
-    # Print average loss for each epoch
     if dist.get_rank() == 0:
         print("Average loss for each epoch:")
         print(epoch_losses)
@@ -180,22 +201,25 @@ def evaluate_model(model, test_loader):
             input_ids_en = input_ids_en.to(device)
             input_ids_zh = input_ids_zh.to(device)
 
-            src_mask = (input_ids_en != 0).to(device)
-            tgt_mask = (input_ids_zh != 0).to(device)
+            src_key_padding_mask = (input_ids_en == 0).to(device)
+            tgt_key_padding_mask = (input_ids_zh == 0).to(device)
 
-            src_mask = src_mask.transpose(0, 1)
-            tgt_mask = tgt_mask.transpose(0, 1)
-            outputs = model(input_ids_en, input_ids_zh, src_mask, tgt_mask)
+            outputs = model(
+                input_ids_en, input_ids_zh, src_key_padding_mask, tgt_key_padding_mask
+            )
 
-            target_ids = torch.roll(input_ids_zh, shifts=-1, dims=1)
-            target_ids[:, -1] = 0  # pad token
-            loss = criterion(outputs.view(-1, outputs.size(-1)), target_ids.view(-1))
+            target_ids = input_ids_zh[:, 1:].contiguous()
+            output_logits = outputs[:, :-1, :].contiguous()
+            loss = criterion(
+                output_logits.view(-1, output_logits.size(-1)), target_ids.view(-1)
+            )
             average_loss += loss.item()
 
             # compute accuracy
-            preds = torch.argmax(outputs, dim=-1)
-            all_preds.extend(preds.cpu().numpy().flatten())
-            all_labels.extend(input_ids_zh.cpu().numpy().flatten())
+            preds = torch.argmax(output_logits, dim=-1)
+            non_pad_indices = target_ids != 0
+            all_preds.extend(preds[non_pad_indices].cpu().numpy().flatten())
+            all_labels.extend(target_ids[non_pad_indices].cpu().numpy().flatten())
 
     average_loss /= len(test_loader)
     all_preds = np.array(all_preds)
@@ -212,14 +236,20 @@ def generate_text(
     # Initialize tgt_ids with the start token, matching the shape of input_ids
     tgt_ids = torch.full(input_ids.shape, 0, dtype=torch.long).to(device)
     tgt_ids[:, 0] = start_token_id
+    src_key_padding_mask = (input_ids == 0).to(device)
+    tgt_key_padding_mask = (tgt_ids == 0).to(device)
     with torch.no_grad():
         for i in tqdm(range(max_length - 1)):  # Adjust range to max_length - 1
-            outputs = model(input_ids, tgt_ids)
+            outputs = model(
+                input_ids, tgt_ids, src_key_padding_mask, tgt_key_padding_mask
+            )
             next_token_logits = outputs[:, i, :]  # Use the current position i
             next_token_id = torch.argmax(next_token_logits, dim=-1)
             tgt_ids[:, i + 1] = next_token_id  # Append the token to index i + 1
             if eos_token_id is not None and (next_token_id == eos_token_id).all():
                 break
+
+            tgt_key_padding_mask[:, i + 1] = False
 
     print(tgt_ids)
     return tgt_ids
@@ -227,12 +257,20 @@ def generate_text(
 
 @record
 def main():
+
     setup_distributed()
 
     # Load data
-    dataset = load_dataset("iwslt2017", "iwslt2017-en-zh")
+    import os
+
+    cache_dir = "/home/richardfan/data"
+    os.environ["HF_DATASETS_CACHE"] = cache_dir
+    dataset = load_dataset(
+        "iwslt2017", "iwslt2017-en-zh", cache_dir=cache_dir, trust_remote_code=True
+    )
     # dataset["train"] = dataset["train"].select(range(10))
     # dataset["test"] = dataset["test"].select(range(10))
+    print(f"train dataset size: {len(dataset['train'])}")
 
     # Inspect the dataset structure
     # print(dataset["train"][0])  # Print the first item to understand the structure
@@ -241,7 +279,8 @@ def main():
     tokenizer_en = AutoTokenizer.from_pretrained("bert-base-uncased")
     tokenizer_zh = AutoTokenizer.from_pretrained("bert-base-chinese")
 
-    max_seq_length = get_max_seq_length(percentile=95, plot=True)
+    # max_seq_length = get_max_seq_length(percentile=95, plot=True)
+    max_seq_length = 71
 
     # Tokenize data using batch processing with progress bar
     train_encodings_en = tokenizer_en.batch_encode_plus(
@@ -312,10 +351,10 @@ def main():
     model = TransformerEncoderDecoder(
         vocab_size_en=tokenizer_en.vocab_size,
         vocab_size_zh=tokenizer_zh.vocab_size,
-        embed_dim=768,
-        num_heads=16,
-        num_layers=3,
-        dim_feedforward=768,
+        embed_dim=512,
+        num_heads=8,
+        num_layers=6,
+        dim_feedforward=512,
         dropout=0.1,
     ).to(device)
 
