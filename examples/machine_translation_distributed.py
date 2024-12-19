@@ -279,8 +279,10 @@ def main():
     tokenizer_en = AutoTokenizer.from_pretrained("bert-base-uncased")
     tokenizer_zh = AutoTokenizer.from_pretrained("bert-base-chinese")
 
-    # max_seq_length = get_max_seq_length(percentile=95, plot=True)
-    max_seq_length = 71
+    # max_seq_length = get_max_seq_length(percentile=100, plot=True)
+    # print(f"max_seq_length: {max_seq_length}")
+    # return
+    max_seq_length = 104
 
     # Tokenize data using batch processing with progress bar
     train_encodings_en = tokenizer_en.batch_encode_plus(
