@@ -287,7 +287,8 @@ def generate_example(max_seq_length):
     ).to(device)
     # model.load_model("model_2024-12-18_03:40:35.pth")
     # model.load_model("model_2024-12-18_04:07:10.pth") # 2 epoch
-    model.load_model("model_2024-12-18_11:57:17.pth")  # 50 epochs
+    # model.load_model("model_2024-12-18_11:57:17.pth")  # 50 epochs 95% truncation
+    model.load_model("model_2024-12-19_07:41:27.pth")  # 50 epochs 99% truncation
 
     # dataset = load_dataset("iwslt2017", "iwslt2017-en-zh")
     # test_encodings_en = tokenizer_en.batch_encode_plus(
@@ -306,7 +307,7 @@ def generate_example(max_seq_length):
     # test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False, num_workers=4)
 
     # prompt = "how are you?"
-    prompt = "beijing is a beautiful city"
+    # prompt = "beijing is a beautiful city"
     # prompt = "Several years ago here at TED, Peter Skillman introduced a design challenge called the marshmallow..."
     # prompt = "I am a student at the University of California, Berkeley"
     input_ids = tokenizer_en.encode(
