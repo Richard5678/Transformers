@@ -2,7 +2,7 @@
 This is a simple machine translation example (English to Chinese) using a TransformerEncoderDecoder model.
 
 # run with:
-# torchrun --nproc_per_node=8 examples/machine_translation_distributed.py
+# torchrun --nproc_per_node=4 examples/machine_translation_distributed.py
 """
 
 import torch
@@ -129,7 +129,7 @@ def get_learning_rate(step_num, d_model, warmup_steps):
     return (d_model**-0.5) * min(step_num**-0.5, step_num * (warmup_steps**-1.5))
 
 
-def train_model(model, train_loader, epochs=50, d_model=512, warmup_steps=4000):
+def train_model(model, train_loader, epochs=50, d_model=512, warmup_steps=4000, save_every=5, start_epoch=0, checkpoint_dir="checkpoints"):
     optimizer = AdamW(model.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9)
     criterion = nn.CrossEntropyLoss(ignore_index=0)
 
@@ -182,6 +182,12 @@ def train_model(model, train_loader, epochs=50, d_model=512, warmup_steps=4000):
             global_step += 1  # Increment the global step
 
         epoch_losses.append(epoch_loss / len(train_loader))
+
+        # Save checkpoint every 'save_every' epochs
+        if (epoch + 1) % save_every == 0 and dist.get_rank() == 0:
+            checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch + 1 + start_epoch}.pth")
+            torch.save(model.module.state_dict(), checkpoint_path)
+            print(f"Checkpoint saved at epoch {epoch + 1} to {checkpoint_path}")
 
         dist.barrier()
 
@@ -260,10 +266,16 @@ def main():
 
     setup_distributed()
 
-    # Load data
-    import os
+    # Create a timestamped directory for checkpoints
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    checkpoint_dir = f"checkpoints_{timestamp}"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    print(f"Checkpoint directory created at: {checkpoint_dir}")
 
-    cache_dir = "/home/richardfan/data"
+    # Load data
+   
+
+    cache_dir = "~/data"
     os.environ["HF_DATASETS_CACHE"] = cache_dir
     dataset = load_dataset(
         "iwslt2017", "iwslt2017-en-zh", cache_dir=cache_dir, trust_remote_code=True
@@ -272,9 +284,6 @@ def main():
     # dataset["test"] = dataset["test"].select(range(10))
     print(f"train dataset size: {len(dataset['train'])}")
 
-    # Inspect the dataset structure
-    # print(dataset["train"][0])  # Print the first item to understand the structure
-
     # Tokenize data
     tokenizer_en = AutoTokenizer.from_pretrained("bert-base-uncased")
     tokenizer_zh = AutoTokenizer.from_pretrained("bert-base-chinese")
@@ -282,7 +291,7 @@ def main():
     # max_seq_length = get_max_seq_length(percentile=100, plot=True)
     # print(f"max_seq_length: {max_seq_length}")
     # return
-    max_seq_length = 104
+    max_seq_length = 104 # 99 percentile
 
     # Tokenize data using batch processing with progress bar
     train_encodings_en = tokenizer_en.batch_encode_plus(
@@ -359,18 +368,19 @@ def main():
         dim_feedforward=512,
         dropout=0.1,
     ).to(device)
+    model.load_model('model_2024-12-19_07:41:27.pth') # 50 epochs
 
     # Wrap the model with DistributedDataParallel
     model = DDP(model, device_ids=[torch.cuda.current_device()])
 
     # Train model
-    train_model(model, train_loader)
+    train_model(model, train_loader, start_epoch=50, checkpoint_dir=checkpoint_dir)
 
     # Save model
     if dist.get_rank() == 0:
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
-        # Save the model's state_dict instead of the model itself
-        torch.save(model.module.state_dict(), f"model_{timestamp}.pth")
+        model_checkpoint_path = os.path.join(checkpoint_dir, f"model_{timestamp}.pth")
+        torch.save(model.module.state_dict(), model_checkpoint_path)
+        print(f"Final model saved at: {model_checkpoint_path}")
 
     # Evaluate model
     evaluate_model(model, test_loader)
