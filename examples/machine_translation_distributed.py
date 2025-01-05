@@ -10,6 +10,7 @@ import torch.distributed as dist
 import numpy as np
 import matplotlib.pyplot as plt
 import math
+import socket
 
 from datetime import datetime
 from torch.utils.data import DataLoader
@@ -23,6 +24,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 import os
 import warnings
+import signal
+import sys
 
 # Suppress specific PyTorch warnings
 warnings.filterwarnings("ignore")
@@ -107,18 +110,30 @@ class CustomDataset(torch.utils.data.Dataset):
         return len(self.encodings_en["input_ids"])
 
 
+def find_free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('', 0))
+        return s.getsockname()[1]
+
+
 def setup_distributed():
-    import os
+    # Only set MASTER_PORT if not already set
+    if 'MASTER_PORT' not in os.environ:
+        free_port = find_free_port()
+        os.environ['MASTER_PORT'] = str(free_port)
 
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     local_rank = int(os.environ["LOCAL_RANK"])
     dist.init_process_group(
-        backend="nccl", init_method="env://", rank=rank, world_size=world_size
+        backend="nccl",
+        init_method="env://",
+        rank=rank,
+        world_size=world_size
     )
     torch.cuda.set_device(local_rank)
 
-    print(f"Initialized process {rank} out of {world_size} on device {local_rank}")
+    print(f"Initialized process {rank} out of {world_size} on device {local_rank} with MASTER_PORT={os.environ['MASTER_PORT']}")
 
 
 def cleanup_distributed():
@@ -259,6 +274,15 @@ def generate_text(
 
     print(tgt_ids)
     return tgt_ids
+
+
+def signal_handler(sig, frame):
+    print('Terminating...')
+    dist.destroy_process_group()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 
 @record
