@@ -317,6 +317,7 @@ def main():
     # return
     max_seq_length = 104 # 99 percentile
 
+
     # Tokenize data using batch processing with progress bar
     train_encodings_en = tokenizer_en.batch_encode_plus(
         [
