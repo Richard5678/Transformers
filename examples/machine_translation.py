@@ -14,10 +14,69 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # from mytransformers.models import TransformerEncoderDecoder
-from machine_translation_distributed import TransformerEncoderDecoder
+# from machine_translation_distributed import TransformerEncoderDecoder
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+class TransformerEncoderDecoder(nn.Module):
+    def __init__(
+        self,
+        vocab_size_en,
+        vocab_size_zh,
+        embed_dim,
+        num_heads,
+        num_layers,
+        dim_feedforward,
+        dropout,
+    ):
+        super(TransformerEncoderDecoder, self).__init__()
+        self.embedding_en = nn.Embedding(vocab_size_en, embed_dim)
+        self.embedding_zh = nn.Embedding(vocab_size_zh, embed_dim)
+        self.transformer = nn.Transformer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            num_encoder_layers=num_layers,
+            num_decoder_layers=num_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation="relu",
+            batch_first=True,
+        )
+        self.fc_out = nn.Linear(embed_dim, vocab_size_zh)
+
+    def forward(self, src, tgt, src_key_padding_mask=None, tgt_key_padding_mask=None):
+        src_emb = self.embedding_en(src) * math.sqrt(self.transformer.d_model)
+        tgt_emb = self.embedding_zh(tgt) * math.sqrt(self.transformer.d_model)
+
+        # Ensure masks are of the same type
+        src_key_padding_mask = (
+            src_key_padding_mask.to(torch.bool)
+            if src_key_padding_mask is not None
+            else None
+        )
+        tgt_key_padding_mask = (
+            tgt_key_padding_mask.to(torch.bool)
+            if tgt_key_padding_mask is not None
+            else None
+        )
+
+        subsequent_mask = torch.triu(
+            torch.ones(tgt.size(1), tgt.size(1), dtype=torch.bool), diagonal=1
+        ).to(device)
+
+        output = self.transformer(
+            src_emb,
+            tgt_emb,
+            src_key_padding_mask=src_key_padding_mask,
+            tgt_key_padding_mask=tgt_key_padding_mask,
+            tgt_mask=subsequent_mask,
+        )
+        return self.fc_out(output)
+
+    def load_model(self, path):
+        self.load_state_dict(torch.load(path))
 
 
 def load_data():
@@ -60,8 +119,8 @@ def train_model(model, train_loader, epochs=1):
             input_ids_zh = input_ids_zh.to(device)
 
             # Ensure masks have the correct shape (batch_size, seq_len)
-            src_mask = (input_ids_en != 0).to(device)
-            tgt_mask = (input_ids_zh != 0).to(device)
+            src_mask = (input_ids_en == 0).to(device)
+            tgt_mask = (input_ids_zh == 0).to(device)
 
             # Transpose the masks to match the expected shape
             src_mask = src_mask.transpose(0, 1)
@@ -93,8 +152,8 @@ def evaluate_model(model, test_loader):
             input_ids_en = input_ids_en.to(device)
             input_ids_zh = input_ids_zh.to(device)
 
-            src_mask = (input_ids_en != 0).to(device)
-            tgt_mask = (input_ids_zh != 0).to(device)
+            src_mask = (input_ids_en == 0).to(device)
+            tgt_mask = (input_ids_zh == 0).to(device)
 
             src_mask = src_mask.transpose(0, 1)
             tgt_mask = tgt_mask.transpose(0, 1)
@@ -120,7 +179,7 @@ def evaluate_model(model, test_loader):
 
 def generate_text(
     model, input_ids, max_length=512, start_token_id=None, eos_token_id=None
-):
+) -> torch.Tensor:
     model.eval()
     # Initialize tgt_ids with the start token, matching the shape of input_ids
     tgt_ids = torch.full(input_ids.shape, 0, dtype=torch.long).to(device)
@@ -140,8 +199,73 @@ def generate_text(
 
             tgt_key_padding_mask[:, i + 1] = False
 
-    print(tgt_ids)
+    # print(tgt_ids)
     return tgt_ids
+
+
+def get_bleu_score(target_seq: torch.Tensor, pred_seq: torch.Tensor, tokenizer: AutoTokenizer) -> float:
+    from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+    import jieba
+
+    # Convert token IDs back to text
+    if isinstance(target_seq, torch.Tensor):
+        target_seq = target_seq.cpu().numpy()
+    if isinstance(pred_seq, torch.Tensor):
+        pred_seq = pred_seq.cpu().numpy()
+
+    # Remove padding tokens (0s)
+    target_seq = target_seq[target_seq != 0]
+    pred_seq = pred_seq[pred_seq != 0]
+
+    # Convert to strings and segment Chinese text
+    target_str = tokenizer.decode(target_seq, skip_special_tokens=True)
+    pred_str = tokenizer.decode(pred_seq, skip_special_tokens=True)
+    # print(f"Target: {target_str}")
+    # print(f"Pred: {pred_str}")
+    # Segment into words/characters
+    target_tokens = list(jieba.cut(target_str))
+    pred_tokens = list(jieba.cut(pred_str))
+
+    # Calculate BLEU score with smoothing
+    smoothing = SmoothingFunction().method1
+    weights = (0.25, 0.25, 0.25, 0.25)  # Equal weights for 1-4 grams
+    
+    try:
+        bleu_score = sentence_bleu([target_tokens], pred_tokens, 
+                                 weights=weights,
+                                 smoothing_function=smoothing)
+    except Exception as e:
+        print(f"Error calculating BLEU score: {e}")
+        bleu_score = 0.0
+
+    return bleu_score
+
+def evaluate_model_bleu(model, test_loader, tokenizer_zh):
+    bleu_scores = []
+    for input_ids_en, input_ids_zh in tqdm(test_loader, desc="Evaluating"):
+        input_ids_en = input_ids_en.to(device)
+        input_ids_zh = input_ids_zh.to(device)
+
+        target_ids = torch.roll(input_ids_zh, shifts=-1, dims=1).to(device)
+        target_ids[:, -1] = 0  # pad token
+
+        pred_seq = generate_text(
+            model,
+            input_ids_en,
+            max_length=max_seq_length,
+            start_token_id=tokenizer_zh.cls_token_id,
+            eos_token_id=tokenizer_zh.sep_token_id,
+        )
+        # print(f"Target ids: {target_ids}")
+        # print(f"Pred ids: {pred_seq}")
+        bleu_score = get_bleu_score(target_ids, pred_seq, tokenizer_zh)
+        bleu_scores.append(bleu_score)
+
+    average_bleu_score = np.mean(bleu_scores)
+    std_bleu_score = np.std(bleu_scores)
+    print(f"Average BLEU score: {average_bleu_score:.4f} ± {std_bleu_score:.4f}")
+
+    
 
 
 def main():
@@ -158,7 +282,8 @@ def main():
     tokenizer_zh = AutoTokenizer.from_pretrained("bert-base-chinese")
 
     # max_seq_length = get_max_seq_length(percentile=95, plot=True)
-    max_seq_length = 71
+    # max_seq_length = 71
+    max_seq_length = 104
 
     # Tokenize data using batch processing with progress bar
     train_encodings_en = tokenizer_en.batch_encode_plus(
@@ -289,6 +414,7 @@ def generate_example(max_seq_length):
     # model.load_model("model_2024-12-18_04:07:10.pth") # 2 epoch
     # model.load_model("model_2024-12-18_11:57:17.pth")  # 50 epochs 95% truncation
     model.load_model("model_2024-12-19_07:41:27.pth")  # 50 epochs 99% truncation
+    # model.load_model("checkpoints_2025-01-05_16-23-13/checkpoint_epoch_85.pth")
 
     # dataset = load_dataset("iwslt2017", "iwslt2017-en-zh")
     # test_encodings_en = tokenizer_en.batch_encode_plus(
@@ -306,9 +432,10 @@ def generate_example(max_seq_length):
     # test_dataset = CustomDataset(test_encodings_en, test_encodings_zh)
     # test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False, num_workers=4)
 
-    # prompt = "how are you?"
+    # prompt = "hello, how are you?"
     # prompt = "beijing is a beautiful city"
-    # prompt = "Several years ago here at TED, Peter Skillman introduced a design challenge called the marshmallow..."
+    prompt = "Several years ago here at TED, Peter Skillman introduced a design challenge called the marshmallow..."
+    target = "几年前，彼得·斯金曼在这里的TED上介绍了一个名为棉花糖挑战的设计挑战。"
     # prompt = "I am a student at the University of California, Berkeley"
     input_ids = tokenizer_en.encode(
         prompt,
@@ -330,6 +457,9 @@ def generate_example(max_seq_length):
     )
     # print translated text
     print(tokenizer_zh.decode(outputs[0], skip_special_tokens=True))
+    
+    target_ids = tokenizer_zh.encode(target, padding="max_length", truncation=True, max_length=max_seq_length, return_tensors="pt").to(device)
+    print(f"BLEU score: {get_bleu_score(target_ids, outputs, tokenizer_zh)}")
 
 
 def get_max_seq_length(percentile=95, plot=False):
@@ -399,4 +529,87 @@ def get_max_seq_length(percentile=95, plot=False):
 if __name__ == "__main__":
     # main()
 
-    generate_example(max_seq_length=71)
+    # generate_example(max_seq_length=71)
+
+    
+    tokenizer_zh = AutoTokenizer.from_pretrained("bert-base-chinese")
+    tokenizer_en = AutoTokenizer.from_pretrained("bert-base-uncased")
+    # model = TransformerEncoderDecoder(
+    #     embed_dim=768,
+    #     num_heads=16,
+    #     vocab_size=tokenizer_en.vocab_size,
+    #     num_labels=tokenizer_zh.vocab_size,
+    #     max_seq_length=max_seq_length,
+    #     num_layers=3,
+    #     hidden_dim=768,
+    # ).to(device)
+    # model.load_model("/home/richard/Transformers/model_2024-12-14_16:42:36.pth")
+    # model.load_model("model_2024-12-14_19:08:39.pth")
+    # model.load_model("model_2024-12-15_01:07:29.pth")
+    # model.load_model("model_2024-12-15_01:25:58.pth")
+    # model.load_model("model_2024-12-15_01:33:03.pth")
+    # model.load_model("model_2024-12-15_02:27:16.pth")
+    # model.load_model("model_2024-12-15_02:36:19.pth")
+    # model.load_model("model_2024-12-15_02:42:26.pth")
+
+    from machine_translation_distributed import TransformerEncoderDecoder
+
+    # model = TransformerEncoderDecoder(
+    #     vocab_size_en=tokenizer_en.vocab_size,
+    #     vocab_size_zh=tokenizer_zh.vocab_size,
+    #     embed_dim=768,
+    #     num_heads=16,
+    #     num_layers=3,
+    #     dim_feedforward=768,
+    #     dropout=0.1,
+    # ).to(device)
+    # model.load_model("model_2024-12-15_03:27:21.pth")  # lib transformer
+    # model.load_model("model_2024-12-15_07:02:19.pth") # library use - long training
+
+    model = TransformerEncoderDecoder(
+        vocab_size_en=tokenizer_en.vocab_size,
+        vocab_size_zh=tokenizer_zh.vocab_size,
+        embed_dim=512,
+        num_heads=8,
+        num_layers=6,
+        dim_feedforward=512,
+        dropout=0.1,
+    ).to(device)
+    # model.load_model("model_2024-12-18_03:40:35.pth")
+    # model.load_model("model_2024-12-18_04:07:10.pth") # 2 epoch
+    # model.load_model("model_2024-12-18_11:57:17.pth")  # 50 epochs 95% truncation
+    model.load_model("model_2024-12-19_07:41:27.pth")
+
+    max_seq_length = 104
+    
+    dataset = load_dataset("iwslt2017", "iwslt2017-en-zh")
+
+    test_encodings_en = tokenizer_en.batch_encode_plus(
+        [
+            item["translation"]["en"]
+            for item in tqdm(dataset["test"], desc="Tokenizing English Test Data")
+        ],
+        padding=True,
+        truncation=True,
+        max_length=max_seq_length,
+        return_tensors="pt",
+    )
+    
+    test_encodings_zh = tokenizer_zh.batch_encode_plus(
+        [
+            item["translation"]["zh"]
+            for item in tqdm(dataset["test"], desc="Tokenizing Chinese Test Data")
+        ],
+        padding=True,
+        truncation=True,
+        max_length=max_seq_length,
+        return_tensors="pt",
+    )
+
+    test_dataset = CustomDataset(test_encodings_en, test_encodings_zh)
+
+    # Create dataloaders
+    test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False, num_workers=4)
+    
+    evaluate_model_bleu(model, test_loader, tokenizer_zh)
+    
