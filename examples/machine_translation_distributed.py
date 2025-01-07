@@ -11,6 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import math
 import socket
+import copy
 
 from datetime import datetime
 from torch.utils.data import DataLoader
@@ -34,7 +35,10 @@ warnings.filterwarnings("ignore")
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
+# encoder decoder transformer built on top of library implementation of transformer
 class TransformerEncoderDecoder(nn.Module):
     def __init__(
         self,
@@ -45,7 +49,7 @@ class TransformerEncoderDecoder(nn.Module):
         num_layers,
         dim_feedforward,
         dropout,
-        max_seq_length,
+        max_seq_length=104,
     ):
         super(TransformerEncoderDecoder, self).__init__()
         self.embedding_en = nn.Embedding(vocab_size_en, embed_dim)
@@ -65,11 +69,23 @@ class TransformerEncoderDecoder(nn.Module):
         self.fc_out = nn.Linear(embed_dim, vocab_size_zh)
 
     def forward(self, src, tgt, src_key_padding_mask=None, tgt_key_padding_mask=None):
-        src_pos = torch.arange(0, src.size(1), device=src.device).unsqueeze(0).repeat(src.size(0), 1)
-        tgt_pos = torch.arange(0, tgt.size(1), device=tgt.device).unsqueeze(0).repeat(tgt.size(0), 1)
+        src_pos = (
+            torch.arange(0, src.size(1), device=src.device)
+            .unsqueeze(0)
+            .repeat(src.size(0), 1)
+        )
+        tgt_pos = (
+            torch.arange(0, tgt.size(1), device=tgt.device)
+            .unsqueeze(0)
+            .repeat(tgt.size(0), 1)
+        )
 
-        src_emb = self.embedding_en(src) * math.sqrt(self.transformer.d_model) + self.pos_embedding_en(src_pos)
-        tgt_emb = self.embedding_zh(tgt) * math.sqrt(self.transformer.d_model) + self.pos_embedding_zh(tgt_pos)
+        src_emb = self.embedding_en(src) * math.sqrt(
+            self.transformer.d_model
+        ) + self.pos_embedding_en(src_pos)
+        tgt_emb = self.embedding_zh(tgt) * math.sqrt(
+            self.transformer.d_model
+        ) + self.pos_embedding_zh(tgt_pos)
 
         # src_emb = self.embedding_en(src) * math.sqrt(self.transformer.d_model)
         # tgt_emb = self.embedding_zh(tgt) * math.sqrt(self.transformer.d_model)
@@ -103,9 +119,22 @@ class TransformerEncoderDecoder(nn.Module):
         self.load_state_dict(torch.load(path))
 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def load_data():
+    """Loads the dataset and returns train and test datasets
+    Returns:
+        train_dataset: torch.utils.data.Dataset
+        test_dataset: torch.utils.data.Dataset
+    """
+    dataset = load_dataset("iwslt2017", "iwslt2017-en-zh")
+    train_dataset = dataset["train"]
+    test_dataset = dataset["test"]
+    print(f"Train dataset size: {len(train_dataset)}")
+    print(f"Test dataset size: {len(test_dataset)}")
+
+    return train_dataset, test_dataset
 
 
+# Torch dataset that return pairs of input ids for english and chinese
 class CustomDataset(torch.utils.data.Dataset):
     def __init__(self, encodings_en, encodings_zh):
         self.encodings_en = encodings_en
@@ -123,60 +152,75 @@ class CustomDataset(torch.utils.data.Dataset):
 
 def find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(('', 0))
+        s.bind(("", 0))
         return s.getsockname()[1]
 
 
 def setup_distributed():
     # Only set MASTER_PORT if not already set
-    if 'MASTER_PORT' not in os.environ:
+    if "MASTER_PORT" not in os.environ:
         free_port = find_free_port()
-        os.environ['MASTER_PORT'] = str(free_port)
+        os.environ["MASTER_PORT"] = str(free_port)
 
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     local_rank = int(os.environ["LOCAL_RANK"])
     dist.init_process_group(
-        backend="nccl",
-        init_method="env://",
-        rank=rank,
-        world_size=world_size
+        backend="nccl", init_method="env://", rank=rank, world_size=world_size
     )
     torch.cuda.set_device(local_rank)
 
-    print(f"Initialized process {rank} out of {world_size} on device {local_rank} with MASTER_PORT={os.environ['MASTER_PORT']}")
+    print(
+        f"Initialized process {rank} out of {world_size} on device {local_rank} with MASTER_PORT={os.environ['MASTER_PORT']}"
+    )
 
 
 def cleanup_distributed():
     dist.destroy_process_group()
 
 
-def get_learning_rate(step_num, d_model, warmup_steps):
-    return (d_model**-0.5) * min(step_num**-0.5, step_num * (warmup_steps**-1.5))
+def get_learning_rate(step, d_model, warmup_steps):
+    """Compute learning rate using the formula from the Transformer paper."""
+    arg1 = step**-0.5
+    arg2 = step * (warmup_steps**-1.5)
+    return (d_model**-0.5) * min(arg1, arg2)
 
 
-def train_model(model, train_loader, epochs=50, d_model=512, warmup_steps=4000, save_every=5, start_epoch=0, checkpoint_dir="checkpoints"):
+def train_model(
+    model,
+    train_loader,
+    val_loader,
+    epochs=50,
+    d_model=512,
+    warmup_steps=4000,
+    save_every=5,
+    start_epoch=0,
+    checkpoint_dir="checkpoints",
+    patience=5,
+):
+    """
+    Model training loop with early stopping based on validation loss.
+    """
     optimizer = AdamW(model.parameters(), lr=1e-5, betas=(0.9, 0.98), eps=1e-9)
     criterion = nn.CrossEntropyLoss(ignore_index=0)
 
     model.train()
-
-    if dist.get_rank() == 0:
-        epoch_iterator = range(epochs)
-    else:
-        epoch_iterator = range(epochs)
-
     epoch_losses = []
-
+    val_losses = []
+    best_val_loss = float("inf")
+    epochs_without_improvement = 0
     global_step = 0  # Track the global step number
+    best_model_state = copy.deepcopy(model.state_dict())  # To store the best model
 
-    for epoch in epoch_iterator:
+    # Train loop
+    # for epoch in tqdm(range(epochs), desc="Training epochs"):
+    for epoch in range(epochs):
         train_loader.sampler.set_epoch(epoch)
 
         print(f"Starting epoch {epoch} on rank {dist.get_rank()}")
         epoch_loss = 0
         if dist.get_rank() == 0:
-            batch_iterator = tqdm(train_loader)
+            batch_iterator = tqdm(train_loader)  # Progress bar for training
         else:
             batch_iterator = train_loader
 
@@ -194,7 +238,6 @@ def train_model(model, train_loader, epochs=50, d_model=512, warmup_steps=4000, 
             output_logits = outputs[:, :-1, :].reshape(-1, outputs.size(-1))
 
             loss = criterion(output_logits, target_ids)
-
             loss.backward()
 
             # Update learning rate
@@ -206,25 +249,67 @@ def train_model(model, train_loader, epochs=50, d_model=512, warmup_steps=4000, 
 
             epoch_loss += loss.item()
             global_step += 1  # Increment the global step
-            
-            # break
 
-        epoch_losses.append(epoch_loss / len(train_loader))
+        epoch_loss = epoch_loss / len(train_loader)
+        epoch_losses.append(epoch_loss)
+        print(f"Epoch {epoch + 1} training loss: {epoch_loss:.4f}")
+
+        # Validate after each epoch
+        val_loss = evaluate_loss(model, val_loader)
+        val_losses.append(val_loss)
+        print(f"Epoch {epoch + 1} validation loss: {val_loss:.4f}")
+
+        # Check for improvement
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            epochs_without_improvement = 0
+            best_model_state = copy.deepcopy(model.state_dict())
+            print("Validation loss improved. Saving best model state.")
+        else:
+            epochs_without_improvement += 1
+            print(
+                f"No improvement in validation loss for {epochs_without_improvement} epoch(s)."
+            )
+
+        # Early stopping
+        if epochs_without_improvement >= patience:
+            checkpoint_path = os.path.join(
+                checkpoint_dir, f"best_model_{epoch + 1 + start_epoch}.pth"
+            )
+            torch.save(best_model_state, checkpoint_path)
+            print(
+                f"Early stopping triggered after {patience} epochs without improvement."
+            )
+            break
 
         # Save checkpoint every 'save_every' epochs
         if (epoch + 1) % save_every == 0 and dist.get_rank() == 0:
-            checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch + 1 + start_epoch}.pth")
-            torch.save(model.module.state_dict(), checkpoint_path)
+            checkpoint_path = os.path.join(
+                checkpoint_dir, f"checkpoint_epoch_{epoch + 1 + start_epoch}.pth"
+            )
+            torch.save(best_model_state, checkpoint_path)
             print(f"Checkpoint saved at epoch {epoch + 1} to {checkpoint_path}")
 
-        # dist.barrier()
+        dist.barrier()
+
+    # Restore the best model state
+    model.load_state_dict(best_model_state)
+    print("Restored the best model state based on validation loss.")
+
+    dist.barrier()
 
     if dist.get_rank() == 0:
-        print("Average loss for each epoch:")
-        print(epoch_losses)
+        print("Training complete.")
+        print("Training losses:", epoch_losses)
+        print("Validation losses:", val_losses)
 
 
 def evaluate_model(model, test_loader):
+    """Evaluate the model on the test set
+    Args:
+        model: The model to evaluate
+        test_loader: The testing data loader
+    """
     criterion = nn.CrossEntropyLoss(ignore_index=0)
     average_loss = 0
     all_preds = []
@@ -266,6 +351,16 @@ def evaluate_model(model, test_loader):
 def generate_text(
     model, input_ids, max_length=512, start_token_id=None, eos_token_id=None
 ):
+    """Generate text using the model
+    Args:
+        model: The model to use for generation
+        input_ids: The input IDs
+        max_length: The maximum length of the generated text
+        start_token_id: The start token ID
+        eos_token_id: The end of sequence token ID
+    Returns:
+        tgt_ids: The generated text
+    """
     model.eval()
     # Initialize tgt_ids with the start token, matching the shape of input_ids
     tgt_ids = torch.full(input_ids.shape, 0, dtype=torch.long).to(device)
@@ -290,43 +385,44 @@ def generate_text(
 
 
 def signal_handler(sig, frame):
-    print('Terminating...')
+    print("Terminating...")
     dist.destroy_process_group()
     sys.exit(0)
+
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 
-@record
-def main():
-
-    # Setup distributed training
-    setup_distributed()
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-
-    # Only the process with rank 0 creates the checkpoint directory
-    if rank == 0:
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        checkpoint_dir = f"checkpoints_{timestamp}"
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        print(f"Checkpoint directory created at: {checkpoint_dir}")
-    else:
-        checkpoint_dir = None  # Other ranks do not create the directory
-
-    # Ensure all processes wait until the checkpoint directory is created
-    dist.barrier()
-
-    # Load data
-    cache_dir = "~/data"
-    os.environ["HF_DATASETS_CACHE"] = cache_dir
-    dataset = load_dataset(
-        "iwslt2017", "iwslt2017-en-zh", cache_dir=cache_dir, trust_remote_code=True
+def get_encodings(tokenizer, dataset, lang="en", max_seq_length=104):
+    """Tokenize the dataset
+    Args:
+        tokenizer: The tokenizer to use
+        dataset: The dataset to tokenize
+        lang: The language to tokenize
+    Returns:
+        encodings: The tokenized dataset
+    """
+    encodings = tokenizer.batch_encode_plus(
+        [item["translation"][lang] for item in dataset],
+        padding="max_length",
+        truncation=True,
+        max_length=max_seq_length,
+        return_tensors="pt",
     )
+    return encodings
+
+
+def preprocess_data():
+    """Preprocess the dataset
+    Returns:
+        train_loader: torch.utils.data.DataLoader
+        test_loader: torch.utils.data.DataLoader
+    """
+    train_dataset, test_dataset = load_data()
+
     # dataset["train"] = dataset["train"].select(range(10))
     # dataset["test"] = dataset["test"].select(range(10))
-    print(f"train dataset size: {len(dataset['train'])}")
 
     # Tokenize data
     tokenizer_en = AutoTokenizer.from_pretrained("bert-base-uncased")
@@ -335,49 +431,22 @@ def main():
     # max_seq_length = get_max_seq_length(percentile=100, plot=True)
     # print(f"max_seq_length: {max_seq_length}")
     # return
-    max_seq_length = 104 # 99 percentile
+    max_seq_length = 104  # 99 percentile
 
     # Tokenize data using batch processing with progress bar
-    train_encodings_en = tokenizer_en.batch_encode_plus(
-        [
-            item["translation"]["en"]
-            for item in tqdm(dataset["train"], desc="Tokenizing English Train Data")
-        ],
-        padding="max_length",
-        truncation=True,
-        max_length=max_seq_length,
-        return_tensors="pt",
+    train_encodings_en = get_encodings(
+        tokenizer_en, train_dataset, lang="en", max_seq_length=max_seq_length
     )
-    train_encodings_zh = tokenizer_zh.batch_encode_plus(
-        [
-            item["translation"]["zh"]
-            for item in tqdm(dataset["train"], desc="Tokenizing Chinese Train Data")
-        ],
-        padding="max_length",
-        truncation=True,
-        max_length=max_seq_length,
-        return_tensors="pt",
+    train_encodings_zh = get_encodings(
+        tokenizer_zh, train_dataset, lang="zh", max_seq_length=max_seq_length
     )
-    test_encodings_en = tokenizer_en.batch_encode_plus(
-        [
-            item["translation"]["en"]
-            for item in tqdm(dataset["test"], desc="Tokenizing English Test Data")
-        ],
-        padding="max_length",
-        truncation=True,
-        max_length=max_seq_length,
-        return_tensors="pt",
+    test_encodings_en = get_encodings(
+        tokenizer_en, test_dataset, lang="en", max_seq_length=max_seq_length
     )
-    test_encodings_zh = tokenizer_zh.batch_encode_plus(
-        [
-            item["translation"]["zh"]
-            for item in tqdm(dataset["test"], desc="Tokenizing Chinese Test Data")
-        ],
-        padding="max_length",
-        truncation=True,
-        max_length=max_seq_length,
-        return_tensors="pt",
+    test_encodings_zh = get_encodings(
+        tokenizer_zh, test_dataset, lang="zh", max_seq_length=max_seq_length
     )
+
     print("tokenization done")
 
     train_dataset = CustomDataset(train_encodings_en, train_encodings_zh)
@@ -393,58 +462,13 @@ def main():
         test_dataset, batch_size=8, shuffle=False, num_workers=4, sampler=test_sampler
     )
 
-    # Create model
-    # model = TransformerEncoderDecoder(
-    #     vocab_size_en=tokenizer_en.vocab_size,
-    #     vocab_size_zh=tokenizer_zh.vocab_size,
-    #     embed_dim=768,
-    #     num_heads=16,
-    #     num_layers=3,
-    #     dim_feedforward=768,
-    #     dropout=0.1,
-    # ).to(device)
-    model = TransformerEncoderDecoder(
-        vocab_size_en=tokenizer_en.vocab_size,
-        vocab_size_zh=tokenizer_zh.vocab_size,
-        embed_dim=512,
-        num_heads=8,
-        num_layers=6,
-        dim_feedforward=512,
-        dropout=0.1,
-        max_seq_length=max_seq_length,
-    ).to(device)
-    # model.load_model('model_2024-12-19_07:41:27.pth') # 50 epochs
-
-    
-    # model = TransformerEncoderDecoder(
-    #     embed_dim=512,
-    #     num_heads=8,
-    #     vocab_size=tokenizer_en.vocab_size,
-    #     num_labels=tokenizer_zh.vocab_size,
-    #     max_seq_length=max_seq_length,
-    #     num_layers=6,
-    #     hidden_dim=512,
-    # ).to(device)
-
-    # Wrap the model with DistributedDataParallel
-    # model = DDP(model, device_ids=[torch.cuda.current_device()])
-
-    # Train model
-    train_model(model, train_loader, start_epoch=0, checkpoint_dir=checkpoint_dir)
-
-    # Save model
-    if dist.get_rank() == 0:
-        model_checkpoint_path = os.path.join(checkpoint_dir, f"model_{timestamp}.pth")
-        torch.save(model.module.state_dict(), model_checkpoint_path)
-        print(f"Final model saved at: {model_checkpoint_path}")
-
-    # Evaluate model
-    evaluate_model(model, test_loader)
-
-    cleanup_distributed()
+    return train_loader, test_loader, tokenizer_en, tokenizer_zh, max_seq_length
 
 
 def get_max_seq_length(percentile=95, plot=False):
+    """Get the maximum sequence length for the dataset
+    Find the maximum of the 'percentile' percentile of the english and chinese sequence lengths
+    """
     dataset = load_dataset("iwslt2017", "iwslt2017-en-zh")
     train_dataset = dataset["train"]
     # test_dataset = dataset["test"]
@@ -469,8 +493,6 @@ def get_max_seq_length(percentile=95, plot=False):
         )
         for item in tqdm(train_dataset, desc="Tokenizing Chinese Train Data")
     ]
-    # print(f"Train dataset size: {len(train_dataset)}")
-    # print(f"Test dataset size: {len(test_dataset)}")
 
     max_seq_length_95_en = int(
         np.percentile(en_seq_lengths, percentile)
@@ -506,6 +528,142 @@ def get_max_seq_length(percentile=95, plot=False):
         plt.show()
 
     return max(max_seq_length_95_en, max_seq_length_95_zh)
+
+
+def evaluate_loss(model, val_loader):
+    """
+    Evaluate the model on the validation set and return the average loss.
+    """
+    criterion = nn.CrossEntropyLoss(ignore_index=0)
+    total_loss = 0
+    model.eval()
+    with torch.no_grad():
+        for input_ids_en, input_ids_zh in tqdm(
+            val_loader, desc="Evaluating Validation Loss"
+        ):
+            input_ids_en = input_ids_en.to(device)
+            input_ids_zh = input_ids_zh.to(device)
+
+            src_key_padding_mask = (input_ids_en == 0).to(device)
+            tgt_key_padding_mask = (input_ids_zh == 0).to(device)
+
+            outputs = model(
+                input_ids_en, input_ids_zh, src_key_padding_mask, tgt_key_padding_mask
+            )
+
+            target_ids = input_ids_zh[:, 1:].contiguous()
+            output_logits = outputs[:, :-1, :].contiguous()
+            loss = criterion(
+                output_logits.view(-1, output_logits.size(-1)), target_ids.view(-1)
+            )
+            total_loss += loss.item()
+
+    average_loss = total_loss / len(val_loader)
+    model.train()
+    return average_loss
+
+
+@record
+def main():
+    # Setup distributed training
+    setup_distributed()
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+
+    # Only the process with rank 0 creates the checkpoint directory
+    if rank == 0:
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        checkpoint_dir = f"checkpoints_{timestamp}"
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        print(f"Checkpoint directory created at: {checkpoint_dir}")
+    else:
+        checkpoint_dir = None  # Other ranks do not create the directory
+
+    # Ensure all processes wait until the checkpoint directory is created
+    dist.barrier()
+
+    # Load data
+    cache_dir = "~/data"
+    os.environ["HF_DATASETS_CACHE"] = cache_dir
+
+    train_loader, test_loader, tokenizer_en, tokenizer_zh, max_seq_length = (
+        preprocess_data()
+    )
+
+    # Split the test_loader into validation and test sets
+    # For example purposes, we'll use a simple split
+    val_size = int(0.5 * len(test_loader.dataset))
+    test_size = len(test_loader.dataset) - val_size
+    val_loader, test_loader = torch.utils.data.random_split(
+        test_loader.dataset, [val_size, test_size]
+    )
+
+    # Create new DataLoader instances
+    val_loader = torch.utils.data.DataLoader(
+        val_loader,
+        batch_size=8,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+    )
+
+    # Create model
+    # model = TransformerEncoderDecoder(
+    #     vocab_size_en=tokenizer_en.vocab_size,
+    #     vocab_size_zh=tokenizer_zh.vocab_size,
+    #     embed_dim=768,
+    #     num_heads=16,
+    #     num_layers=3,
+    #     dim_feedforward=768,
+    #     dropout=0.1,
+    # ).to(device)
+    model = TransformerEncoderDecoder(
+        vocab_size_en=tokenizer_en.vocab_size,
+        vocab_size_zh=tokenizer_zh.vocab_size,
+        embed_dim=512,
+        num_heads=8,
+        num_layers=6,
+        dim_feedforward=512,
+        dropout=0.1,
+        max_seq_length=max_seq_length,
+    ).to(device)
+    # model.load_model('model_2024-12-19_07:41:27.pth') # 50 epochs
+
+    # model = TransformerEncoderDecoder(
+    #     embed_dim=512,
+    #     num_heads=8,
+    #     vocab_size=tokenizer_en.vocab_size,
+    #     num_labels=tokenizer_zh.vocab_size,
+    #     max_seq_length=max_seq_length,
+    #     num_layers=6,
+    #     hidden_dim=512,
+    # ).to(device)
+
+    # Wrap the model with DistributedDataParallel
+    # model = DDP(model, device_ids=[torch.cuda.current_device()])
+
+    # Train model
+    train_model(
+        model,
+        train_loader,
+        val_loader,  # Pass validation loader
+        start_epoch=0,
+        checkpoint_dir=checkpoint_dir,
+        patience=5,  # Set patience parameter
+    )
+
+    # Save the best model
+    if dist.get_rank() == 0:
+        model_checkpoint_path = os.path.join(
+            checkpoint_dir, f"best_model_{timestamp}.pth"
+        )
+        torch.save(model.module.state_dict(), model_checkpoint_path)
+        print(f"Best model saved at: {model_checkpoint_path}")
+
+    # Evaluate model
+    evaluate_model(model, test_loader)
+
+    cleanup_distributed()
 
 
 if __name__ == "__main__":
