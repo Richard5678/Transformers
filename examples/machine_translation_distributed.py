@@ -29,13 +29,25 @@ import os
 import warnings
 import signal
 import sys
+from colorama import Fore, Style, init
 
 # Suppress specific PyTorch warnings
 warnings.filterwarnings("ignore")
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+init(autoreset=True)  # Initialize colorama once at the start
+
+
+def print_green(text):
+    """
+    Print text in green color.
+    Args:
+        text: The text to print in green
+    """
+    print(f"{Fore.GREEN}{text}{Style.RESET_ALL}")
 
 
 # encoder decoder transformer built on top of library implementation of transformer
@@ -80,12 +92,8 @@ class TransformerEncoderDecoder(nn.Module):
             .repeat(tgt.size(0), 1)
         )
 
-        src_emb = self.embedding_en(src) * math.sqrt(
-            self.transformer.d_model
-        ) + self.pos_embedding_en(src_pos)
-        tgt_emb = self.embedding_zh(tgt) * math.sqrt(
-            self.transformer.d_model
-        ) + self.pos_embedding_zh(tgt_pos)
+        src_emb = self.embedding_en(src) + self.pos_embedding_en(src_pos)
+        tgt_emb = self.embedding_zh(tgt) + self.pos_embedding_zh(tgt_pos)
 
         # src_emb = self.embedding_en(src) * math.sqrt(self.transformer.d_model)
         # tgt_emb = self.embedding_zh(tgt) * math.sqrt(self.transformer.d_model)
@@ -103,8 +111,9 @@ class TransformerEncoderDecoder(nn.Module):
         )
 
         subsequent_mask = torch.triu(
-            torch.ones(tgt.size(1), tgt.size(1), dtype=torch.bool), diagonal=1
-        ).to(device)
+            torch.ones(tgt.size(1), tgt.size(1), dtype=torch.bool),
+            diagonal=1,
+        ).to(src.device)
 
         output = self.transformer(
             src_emb,
@@ -126,6 +135,8 @@ def load_data():
         test_dataset: torch.utils.data.Dataset
     """
     dataset = load_dataset("iwslt2017", "iwslt2017-en-zh")
+    # dataset["train"] = dataset["train"].select(range(10))
+    # dataset["test"] = dataset["test"].select(range(10))
     train_dataset = dataset["train"]
     test_dataset = dataset["test"]
     print(f"Train dataset size: {len(train_dataset)}")
@@ -165,25 +176,48 @@ def setup_distributed():
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     local_rank = int(os.environ["LOCAL_RANK"])
-    dist.init_process_group(
-        backend="nccl", init_method="env://", rank=rank, world_size=world_size
-    )
-    torch.cuda.set_device(local_rank)
 
-    print(
-        f"Initialized process {rank} out of {world_size} on device {local_rank} with MASTER_PORT={os.environ['MASTER_PORT']}"
+    # Initialize process group with explicit backend and timeout
+    dist.init_process_group(
+        backend="nccl",
+        init_method="env://",
+        rank=rank,
+        world_size=world_size,
+        # timeout=datetime.timedelta(minutes=60),  # Add explicit timeout
     )
+
+    # Set device before any tensor operations
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
+
+    # Print device information for debugging
+    print(
+        f"Rank {rank}: Using GPU {local_rank} - {torch.cuda.get_device_name(local_rank)}"
+    )
+
+    # Ensure CUDA is available
+    assert torch.cuda.is_available(), "CUDA is not available"
+
+    # Add explicit device synchronization
+    torch.cuda.synchronize(device)
+
+    # Use device_ids in barrier
+    dist.barrier(device_ids=[local_rank])
+
+    print(f"Initialized process {rank} out of {world_size} on device {device}")
+    return device
 
 
 def cleanup_distributed():
     dist.destroy_process_group()
 
 
-def get_learning_rate(step, d_model, warmup_steps):
+def get_learning_rate(step_num, d_model, warmup_steps):
     """Compute learning rate using the formula from the Transformer paper."""
-    arg1 = step**-0.5
-    arg2 = step * (warmup_steps**-1.5)
-    return (d_model**-0.5) * min(arg1, arg2)
+    # arg1 = step**-0.5
+    # arg2 = step * (warmup_steps**-1.5)
+    # return (d_model**-0.5) * min(arg1, arg2)
+    return (d_model**-0.5) * min(step_num**-0.5, step_num * (warmup_steps**-1.5))
 
 
 def train_model(
@@ -193,7 +227,7 @@ def train_model(
     epochs=50,
     d_model=512,
     warmup_steps=4000,
-    save_every=5,
+    save_every=2,
     start_epoch=0,
     checkpoint_dir="checkpoints",
     patience=5,
@@ -210,8 +244,8 @@ def train_model(
     best_val_loss = float("inf")
     epochs_without_improvement = 0
     global_step = 0  # Track the global step number
-    best_model_state = copy.deepcopy(model.state_dict())  # To store the best model
-
+    device = model.device
+    # best_model_state = copy.deepcopy(model.state_dict())  # To store the best model
 
     # Train loop
     # for epoch in tqdm(range(epochs), desc="Training epochs"):
@@ -261,44 +295,39 @@ def train_model(
         print(f"Epoch {epoch + 1} validation loss: {val_loss:.4f}")
 
         # Check for improvement
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            epochs_without_improvement = 0
-            best_model_state = copy.deepcopy(model.state_dict())
-            print("Validation loss improved. Saving best model state.")
-        else:
-            epochs_without_improvement += 1
-            print(
-                f"No improvement in validation loss for {epochs_without_improvement} epoch(s)."
-            )
+        # if val_loss < best_val_loss:
+        #     best_val_loss = val_loss
+        #     epochs_without_improvement = 0
+        #     best_model_state = copy.deepcopy(model.state_dict())
+        #     print("Validation loss improved. Saving best model state.")
+        # else:
+        #     epochs_without_improvement += 1
+        #     print(
+        #         f"No improvement in validation loss for {epochs_without_improvement} epoch(s)."
+        #     )
 
         # Early stopping
-        if epochs_without_improvement >= patience:
-            checkpoint_path = os.path.join(
-                checkpoint_dir, f"best_model_{epoch + 1 + start_epoch}.pth"
-            )
-            torch.save(best_model_state, checkpoint_path)
-            print(
-                f"Early stopping triggered after {patience} epochs without improvement."
-            )
-            break
+        # if epochs_without_improvement >= patience:
+        #     if dist.get_rank() == 0:
+        #         checkpoint_path = os.path.join(
+        #             checkpoint_dir, f"best_model_{epoch + 1 + start_epoch}.pth"
+        #         )
+        #         torch.save(best_model_state, checkpoint_path)
+        #     print(
+        #         f"Early stopping triggered after {patience} epochs without improvement."
+        #     )
+        #     break
+        dist.barrier()
 
         # Save checkpoint every 'save_every' epochs
         if (epoch + 1) % save_every == 0 and dist.get_rank() == 0:
             checkpoint_path = os.path.join(
                 checkpoint_dir, f"checkpoint_epoch_{epoch + 1 + start_epoch}.pth"
             )
-            torch.save(best_model_state, checkpoint_path)
+            torch.save(model.module.state_dict(), checkpoint_path)
             print(f"Checkpoint saved at epoch {epoch + 1} to {checkpoint_path}")
 
-        dist.barrier()
-
     # Restore the best model state
-    model.load_state_dict(best_model_state)
-    print("Restored the best model state based on validation loss.")
-
-    dist.barrier()
-
     if dist.get_rank() == 0:
         print("Training complete.")
         print("Training losses:", epoch_losses)
@@ -315,6 +344,7 @@ def evaluate_model(model, test_loader):
     average_loss = 0
     all_preds = []
     all_labels = []
+    device = model.device
     model.eval()
     with torch.no_grad():
         for input_ids_en, input_ids_zh in tqdm(test_loader, desc="Evaluating"):
@@ -323,7 +353,6 @@ def evaluate_model(model, test_loader):
 
             src_key_padding_mask = (input_ids_en == 0).to(device)
             tgt_key_padding_mask = (input_ids_zh == 0).to(device)
-
             outputs = model(
                 input_ids_en, input_ids_zh, src_key_padding_mask, tgt_key_padding_mask
             )
@@ -363,6 +392,7 @@ def generate_text(
         tgt_ids: The generated text
     """
     model.eval()
+    device = model.device
     # Initialize tgt_ids with the start token, matching the shape of input_ids
     tgt_ids = torch.full(input_ids.shape, 0, dtype=torch.long).to(device)
     tgt_ids[:, 0] = start_token_id
@@ -411,6 +441,7 @@ def get_encodings(tokenizer, dataset, lang="en", max_seq_length=104):
         max_length=max_seq_length,
         return_tensors="pt",
     )
+
     return encodings
 
 
@@ -426,29 +457,76 @@ def preprocess_data():
     # dataset["test"] = dataset["test"].select(range(10))
 
     # Tokenize data
-    tokenizer_en = AutoTokenizer.from_pretrained("bert-base-uncased")
-    tokenizer_zh = AutoTokenizer.from_pretrained("bert-base-chinese")
+    # tokenizer_en = AutoTokenizer.from_pretrained("bert-base-uncased")
+    # tokenizer_zh = AutoTokenizer.from_pretrained("bert-base-chinese")
+
+    from transformers import MarianTokenizer
+
+    # Specify the pre-trained model for English to Chinese translation
+    # model_name = "Helsinki-NLP/opus-mt-en-zh"
+
+    # # Load the tokenizer
+    # tokenizer = MarianTokenizer.from_pretrained(model_name)
+
+    from transformers import MBartTokenizer
+
+    tokenizer = MBartTokenizer.from_pretrained("facebook/mbart-large-50")
+
+    # Example sentences
+    # english_sentence = "Hello, how are you?"
+    # chinese_sentence = "你好，你怎么样？"
+
+    english_sentence = "beijing is a beautiful city"
+    chinese_sentence = "北京是一座美丽的城市"
+
+    print(f"English sentence: {english_sentence}")
+    print(f"Chinese sentence: {chinese_sentence}")
+
+    # Tokenize the English sentence
+    en_tokens = tokenizer.encode(english_sentence, return_tensors="pt")
+    print("English Tokens:", en_tokens)
+
+    # Tokenize the Chinese sentence
+    zh_tokens = tokenizer.encode(chinese_sentence, return_tensors="pt")
+    print("Chinese Tokens:", zh_tokens)
+
+    # Decode tokens back to text
+    print(
+        "English Detokenized:", tokenizer.decode(en_tokens[0], skip_special_tokens=True)
+    )
+    print(
+        "Chinese Detokenized:", tokenizer.decode(zh_tokens[0], skip_special_tokens=True)
+    )
 
     # max_seq_length = get_max_seq_length(percentile=100, plot=True)
     # print(f"max_seq_length: {max_seq_length}")
     # return
     max_seq_length = 104  # 99 percentile
 
+    # prompt_input_ids = tokenizer.encode(prompt, return_tensors="pt")
+    # target_input_ids = tokenizer.encode(target, return_tensors="pt")
+
+    # print(f"prompt_input_ids: {prompt_input_ids}")
+    # print(f"target_input_ids: {target_input_ids}")
+
+    # print(f"prompt_input_ids: {tokenizer.decode(prompt_input_ids[0])}")
+    # print(f"target_input_ids: {tokenizer.decode(target_input_ids[0])}")
+
     # Tokenize data using batch processing with progress bar
     train_encodings_en = get_encodings(
-        tokenizer_en, train_dataset, lang="en", max_seq_length=max_seq_length
+        tokenizer, train_dataset, lang="en", max_seq_length=max_seq_length
     )
     train_encodings_zh = get_encodings(
-        tokenizer_zh, train_dataset, lang="zh", max_seq_length=max_seq_length
+        tokenizer, train_dataset, lang="zh", max_seq_length=max_seq_length
     )
     test_encodings_en = get_encodings(
-        tokenizer_en, test_dataset, lang="en", max_seq_length=max_seq_length
+        tokenizer, test_dataset, lang="en", max_seq_length=max_seq_length
     )
     test_encodings_zh = get_encodings(
-        tokenizer_zh, test_dataset, lang="zh", max_seq_length=max_seq_length
+        tokenizer, test_dataset, lang="zh", max_seq_length=max_seq_length
     )
 
-    print("tokenization done")
+    print_green("tokenization done")
 
     train_dataset = CustomDataset(train_encodings_en, train_encodings_zh)
     test_dataset = CustomDataset(test_encodings_en, test_encodings_zh)
@@ -463,7 +541,7 @@ def preprocess_data():
         test_dataset, batch_size=8, shuffle=False, num_workers=4, sampler=test_sampler
     )
 
-    return train_loader, test_loader, tokenizer_en, tokenizer_zh, max_seq_length
+    return train_loader, test_loader, tokenizer, tokenizer, max_seq_length
 
 
 def get_max_seq_length(percentile=95, plot=False):
@@ -538,6 +616,7 @@ def evaluate_loss(model, val_loader):
     criterion = nn.CrossEntropyLoss(ignore_index=0)
     total_loss = 0
     model.eval()
+    device = model.device
     with torch.no_grad():
         for input_ids_en, input_ids_zh in tqdm(
             val_loader, desc="Evaluating Validation Loss"
@@ -564,10 +643,20 @@ def evaluate_loss(model, val_loader):
     return average_loss
 
 
+def set_device():
+    """
+    Set the CUDA device for the current process based on LOCAL_RANK.
+    """
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda", local_rank)
+    return device
+
+
 @record
 def main():
-    # Setup distributed training
-    setup_distributed()
+    # Setup distributed training and get device
+    device = setup_distributed()
     rank = dist.get_rank()
     world_size = dist.get_world_size()
 
@@ -608,14 +697,22 @@ def main():
         pin_memory=True,
     )
 
-    # Create model
+    test_loader = torch.utils.data.DataLoader(
+        test_loader,
+        batch_size=8,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+    )
+
+    # Create model and move to device before DDP wrapping
     # model = TransformerEncoderDecoder(
     #     vocab_size_en=tokenizer_en.vocab_size,
     #     vocab_size_zh=tokenizer_zh.vocab_size,
-    #     embed_dim=768,
-    #     num_heads=16,
+    #     embed_dim=256,
+    #     num_heads=4,
     #     num_layers=3,
-    #     dim_feedforward=768,
+    #     dim_feedforward=256,
     #     dropout=0.1,
     # ).to(device)
     model = TransformerEncoderDecoder(
@@ -628,6 +725,10 @@ def main():
         dropout=0.1,
         max_seq_length=max_seq_length,
     ).to(device)
+
+    total_params = sum(p.numel() for p in model.parameters())
+    print_green(f"Total parameters: {total_params}")
+    # exit()
     # model.load_model('model_2024-12-19_07:41:27.pth') # 50 epochs
 
     # model = TransformerEncoderDecoder(
@@ -640,8 +741,13 @@ def main():
     #     hidden_dim=512,
     # ).to(device)
 
-    # Wrap the model with DistributedDataParallel
-    # model = DDP(model, device_ids=[torch.cuda.current_device()])
+    # Wrap model with DDP using explicit device_ids
+    model = DDP(
+        model,
+        device_ids=[device.index],
+        output_device=device.index,
+        find_unused_parameters=True,  # Add this if needed
+    )
 
     # Train model
     train_model(
@@ -653,13 +759,15 @@ def main():
         patience=5,  # Set patience parameter
     )
 
-    # Save the best model
+    dist.barrier()
+
+    # Save the last
     if dist.get_rank() == 0:
         model_checkpoint_path = os.path.join(
-            checkpoint_dir, f"best_model_{timestamp}.pth"
+            checkpoint_dir, f"last_model_{timestamp}.pth"
         )
         torch.save(model.module.state_dict(), model_checkpoint_path)
-        print(f"Best model saved at: {model_checkpoint_path}")
+        print(f"last model saved at: {model_checkpoint_path}")
 
     # Evaluate model
     evaluate_model(model, test_loader)
